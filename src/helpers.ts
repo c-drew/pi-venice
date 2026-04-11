@@ -1,5 +1,20 @@
+import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
+import {
+  PANEL_REGISTRY,
+  DEFAULT_PANELS,
+  SOURCE_WEIGHTS,
+  fmtAddr,
+  type AllData,
+  type MetricsData,
+  type WalletData,
+  type SocialData,
+  type MarketsData,
+  type LiveData,
+} from "./panels.ts";
 
 import {
   CATALOG_FAMILIES,
@@ -439,6 +454,332 @@ export function buildStatusSummary(state: VeniceState): string {
   ].join("\n");
 }
 
+// --- Venice stats widget ---------------------------------------------------
+// Dynamic rate allocation: budget of BUDGET_PER_MIN req/min is distributed
+// across active sources proportionally by SOURCE_WEIGHTS.  A single 500ms
+// master ticker fires for every source whose interval has elapsed, so adding
+// or removing panels automatically re-balances the request rate.
+//
+// With all 10 panels enabled the weighted split produces ≈21 req/min.
+// With only the default 3 (prices/protocol/wallet, sources: metrics+wallet)
+// the budget concentrates on those two sources at roughly 47 + 3 req/min.
+
+const STATS_WIDGET_KEY  = "venice-stats";
+const STATS_LOG         = join(homedir(), ".pi", "venice-stats.log");
+const FLASH_MS          = 400;
+const BUDGET_DEFAULT    = 30;  // req/min used when no user preference is set
+const BUDGET_MIN        = 1;
+const BUDGET_MAX        = 59;
+const TICK_MS           = 500;
+
+// ── multi-session lock ────────────────────────────────────────────────────────
+// Only one pi session should poll venicestats.com at a time to avoid hitting
+// the 60 req/min per-IP rate limit.  We use a PID file as a lightweight lock.
+
+const WIDGET_LOCK       = join(homedir(), ".pi", "venice-stats.pid");
+let _lockOwned          = false;
+
+export function tryAcquireWidgetLock(): boolean {
+  try {
+    if (existsSync(WIDGET_LOCK)) {
+      const raw = readFileSync(WIDGET_LOCK, "utf8").trim();
+      const pid = Number(raw);
+      if (!isNaN(pid) && pid !== process.pid) {
+        try { process.kill(pid, 0); return false; } // another live session
+        catch { /* stale PID — fall through and overwrite */ }
+      }
+    }
+    writeFileSync(WIDGET_LOCK, String(process.pid), "utf8");
+    _lockOwned = true;
+    return true;
+  } catch { return false; }
+}
+
+export function releaseWidgetLock(): void {
+  if (!_lockOwned) return;
+  try {
+    if (readFileSync(WIDGET_LOCK, "utf8").trim() === String(process.pid)) {
+      unlinkSync(WIDGET_LOCK);
+    }
+  } catch { /* ignore */ }
+  _lockOwned = false;
+}
+
+// ── rate helpers ──────────────────────────────────────────────────────────────
+
+function getActiveSources(panels: string[]): Set<string> {
+  const sources = new Set<string>();
+  for (const id of panels) {
+    for (const src of (PANEL_REGISTRY[id]?.sources ?? [])) sources.add(src);
+  }
+  return sources;
+}
+
+function computeIntervals(activeSources: Set<string>, budgetPerMin: number): Map<string, number> {
+  const budget = Math.max(BUDGET_MIN, Math.min(BUDGET_MAX, budgetPerMin));
+  const minInterval = Math.ceil(60_000 / budget);
+  const totalWeight = [...activeSources].reduce(
+    (s, src) => s + (SOURCE_WEIGHTS[src] ?? 1), 0
+  );
+  const map = new Map<string, number>();
+  for (const src of activeSources) {
+    const reqPerMin = ((SOURCE_WEIGHTS[src] ?? 1) / totalWeight) * budget;
+    map.set(src, Math.max(minInterval, Math.round(60_000 / reqPerMin)));
+  }
+  return map;
+}
+
+function plog(msg: string) {
+  const ts = new Date().toISOString();
+  try { appendFileSync(STATS_LOG, `[${ts}] ${msg}\n`); } catch { /* ignore */ }
+}
+
+export function startPriceWidget(
+  ctx:        ExtensionContext,
+  getWallet:  () => string | undefined,
+  getPanels:  () => string[],
+  getBudget:  () => number,
+): void {
+  plog(`startPriceWidget called — hasUI=${ctx.hasUI}`);
+  if (!ctx.hasUI) return;
+
+  ctx.ui.setWidget(
+    STATS_WIDGET_KEY,
+    (tui, theme) => {
+      plog("widget factory invoked");
+
+      // ── data state ────────────────────────────────────────────────────────
+      let metrics:  MetricsData | null = null;
+      let wallet:   WalletData  | null = null;
+      let social:   SocialData  | null = null;
+      let markets:  MarketsData | null = null;
+      let live:     LiveData    | null = null;
+      let lastWalletAddr: string | undefined;
+      let disposed = false;
+
+      // ── flash state (prices panel) ────────────────────────────────────────
+      type Flash = "up" | "down" | null;
+      let vvvFlash:       Flash = null;
+      let diemFlash:      Flash = null;
+      let vvvFlashTimer:  ReturnType<typeof setTimeout> | null = null;
+      let diemFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+      function setFlash(token: "vvv" | "diem", dir: Flash) {
+        const isVvv = token === "vvv";
+        if (isVvv) { if (vvvFlashTimer)  clearTimeout(vvvFlashTimer); }
+        else       { if (diemFlashTimer) clearTimeout(diemFlashTimer); }
+        if (isVvv) vvvFlash  = dir; else diemFlash  = dir;
+        const t = setTimeout(() => {
+          if (isVvv) vvvFlash = null; else diemFlash = null;
+          if (!disposed) tui.requestRender();
+        }, FLASH_MS);
+        if (isVvv) vvvFlashTimer = t; else diemFlashTimer = t;
+      }
+
+      // ── panel snapshot logger ─────────────────────────────────────────────
+      // Renders every active panel to plain text (strips ANSI) and writes one
+      // log line per panel so `tail -f ~/.pi/venice-stats.log` shows the full
+      // dashboard state after each poll.
+      function logPanels() {
+        const noTheme = {
+          fg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        };
+        const allData: AllData = {
+          metrics, wallet, social, markets, live,
+          walletAddr: getWallet(),
+          flash: { vvv: null, diem: null },
+        };
+        for (const id of getPanels()) {
+          const panel = PANEL_REGISTRY[id];
+          if (!panel) continue;
+          const line = panel.render(allData, noTheme, " · ");
+          if (line) plog(`panel[${id}] ${line}`);
+        }
+      }
+
+      // ── fetchers ──────────────────────────────────────────────────────────
+      async function fetchMetrics() {
+        try {
+          const res = await fetch("https://venicestats.com/api/metrics");
+          if (!res.ok) return;
+          const d = await res.json() as any;
+          if (typeof d.vvvPrice !== "number") return;
+          if (metrics && d.vvvPrice  !== metrics.vvvPrice)  setFlash("vvv",  d.vvvPrice  > metrics.vvvPrice  ? "up" : "down");
+          if (metrics && d.diemPrice !== metrics.diemPrice) setFlash("diem", d.diemPrice > metrics.diemPrice ? "up" : "down");
+          metrics = {
+            vvvPrice: d.vvvPrice, diemPrice: d.diemPrice, ethPrice: d.ethPrice ?? 0,
+            priceChange24h: d.priceChange24h ?? 0, diemPriceChange24h: d.diemPriceChange24h ?? 0,
+            marketCap: d.marketCap ?? 0, stakingRatio: (d.stakingRatio ?? 0) * 100,
+            stakerApr: d.stakerApr ?? 0, lockRatio: (d.lockRatio ?? 0) * 100,
+            mintRate: d.mintRate ?? 0, diemSupply: d.diemSupply ?? 0,
+            daysUntilDiemCap: d.daysUntilDiemCap ?? 0, diemStakeRatio: d.diemStakeRatio ?? 0,
+            stakingGrowth7d: d.stakingGrowth7d ?? 1, newStakers7dCount: d.newStakers7dCount ?? 0,
+            cooldownVvv: d.cooldownVvv ?? 0, veniceRevenue: d.veniceRevenue ?? 0,
+            burnRevenueAnnualized: d.burnRevenueAnnualized ?? 0,
+            totalBurnedFromEvents: d.totalBurnedFromEvents ?? 0,
+            organicBurned: d.organicBurned ?? 0, burnDeflationRate: d.burnDeflationRate ?? 0,
+            emissionRate: d.emissionRate ?? 0,
+          };
+          plog(`metrics ok — VVV=$${d.vvvPrice?.toFixed(4)} DIEM=$${d.diemPrice?.toFixed(2)} ETH=$${d.ethPrice?.toFixed(2)}`);
+          logPanels();
+        } catch (err) { plog(`metrics error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
+      async function fetchWallet() {
+        if (!getPanels().includes("wallet")) { wallet = null; return; }
+        const addr = getWallet();
+        if (!addr) { wallet = null; return; }
+        if (addr !== lastWalletAddr) { wallet = null; lastWalletAddr = addr; }
+        try {
+          const res = await fetch(`https://venicestats.com/api/venetians?address=${addr}`);
+          if (!res.ok) return;
+          const d = await res.json() as any;
+          wallet = {
+            label: d.ensName ?? fmtAddr(d.address ?? addr),
+            role: d.roleLabel ?? "", sizeLabel: d.sizeLabel ?? "",
+            svvvBalance: d.svvvBalance ?? 0, diemStaked: d.diemStaked ?? 0,
+            pendingRewards: d.pendingRewards ?? 0,
+            rank: d.rank ?? 0, totalVenetians: d.totalVenetians ?? 0,
+          };
+          plog(`wallet ok — ${wallet.label} rank #${wallet.rank} sVVV=${wallet.svvvBalance.toFixed(0)} pending=${wallet.pendingRewards.toFixed(2)}`);
+          logPanels();
+        } catch (err) { plog(`wallet error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
+      async function fetchSocial() {
+        if (!getPanels().includes("social")) return;
+        try {
+          const res = await fetch("https://venicestats.com/api/social");
+          if (!res.ok) return;
+          const d = await res.json() as any;
+          social = {
+            erikFollowers: d.erikFollowers ?? 0, sentimentUpPct: d.sentimentUpPct ?? 0,
+            marketCapRank: d.marketCapRank ?? 0, diemMarketCapRank: d.diemMarketCapRank ?? 0,
+            socialVolume: d.socialVolume ?? 0,
+          };
+          plog(`social ok — Erik ${social.erikFollowers} followers sentiment=${social.sentimentUpPct.toFixed(0)}% VVV#${social.marketCapRank}`);
+          logPanels();
+        } catch (err) { plog(`social error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
+      async function fetchMarkets() {
+        if (!getPanels().includes("markets")) return;
+        try {
+          const res = await fetch("https://venicestats.com/api/markets?token=VVV&period=24h");
+          if (!res.ok) return;
+          const d = await res.json() as any;
+          markets = { volume: d.kpis?.volume ?? 0, buyPct: d.kpis?.buyPct ?? 0, traders: d.kpis?.traders ?? 0 };
+          plog(`markets ok — vol=$${markets.volume.toFixed(0)} buys=${markets.buyPct}% traders=${markets.traders}`);
+          logPanels();
+        } catch (err) { plog(`markets error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
+      async function fetchLive() {
+        if (!getPanels().includes("live")) return;
+        try {
+          const res = await fetch("https://venicestats.com/api/live?limit=1");
+          if (!res.ok) return;
+          const d = await res.json() as any;
+          const ev = d.events?.[0];
+          if (ev) {
+            live = { type: ev.type, source: ev.source, amount: ev.amount ?? 0, address: ev.address ?? "", timestamp: ev.timestamp };
+            plog(`live ok — ${live.type} ${live.amount.toFixed(2)} ${live.address ? fmtAddr(live.address) : ""}`);
+            logPanels();
+          }
+        } catch (err) { plog(`live error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
+      // ── dynamic single-ticker polling ─────────────────────────────────────
+      // All sources share a 50 req/min budget split proportionally by weight.
+      // The 500ms master tick fires each fetcher only when its computed
+      // interval has elapsed, so adding/removing panels auto-rebalances rates.
+
+      const fetchFns: Record<string, () => Promise<void>> = {
+        metrics: fetchMetrics,
+        wallet:  fetchWallet,
+        social:  fetchSocial,
+        markets: fetchMarkets,
+        live:    fetchLive,
+      };
+
+      const lastFetch = new Map<string, number>();
+
+      // Log computed schedule then fire each active source once immediately
+      const initSrcs = getActiveSources(getPanels());
+      const initIntervals = computeIntervals(initSrcs, getBudget());
+      const scheduleLines = [...initSrcs].map(src => {
+        const ms = initIntervals.get(src) ?? 0;
+        return `${src}=${(ms / 1000).toFixed(1)}s`;
+      });
+      plog(`poll schedule (budget=${getBudget()} req/min, panels=${getPanels().join(",")}): ${scheduleLines.join(" | ")}`);
+
+      for (const src of initSrcs) {
+        fetchFns[src]?.();
+        lastFetch.set(src, Date.now());
+      }
+
+      const ticker = setInterval(() => {
+        if (disposed) return;
+        const now          = Date.now();
+        const activeSrcs   = getActiveSources(getPanels());
+        const intervals    = computeIntervals(activeSrcs, getBudget());
+        for (const src of activeSrcs) {
+          const due = (lastFetch.get(src) ?? 0) + (intervals.get(src) ?? Math.ceil(60_000 / getBudget()));
+          if (now >= due) {
+            lastFetch.set(src, now);
+            fetchFns[src]?.();
+          }
+        }
+      }, TICK_MS);
+
+      // ── component ─────────────────────────────────────────────────────────
+      return {
+        invalidate() {},
+
+        render(_width: number): string[] {
+          if (!metrics) return [];
+          const sep: string = theme.fg("dim", "  ·  ");
+          const allData: AllData = {
+            metrics, wallet, social, markets, live,
+            walletAddr: getWallet(),
+            flash: { vvv: vvvFlash, diem: diemFlash },
+          };
+          const rows: string[] = [];
+          for (const id of getPanels()) {
+            const panel = PANEL_REGISTRY[id];
+            if (!panel) continue;
+            const line = panel.render(allData, theme as any, sep);
+            if (line) rows.push(line);
+          }
+          return rows;
+        },
+
+        dispose() {
+          plog("dispose() called");
+          disposed = true;
+          clearInterval(ticker);
+          if (vvvFlashTimer)  clearTimeout(vvvFlashTimer);
+          if (diemFlashTimer) clearTimeout(diemFlashTimer);
+        },
+      };
+    },
+    { placement: "belowEditor" },
+  );
+  plog("setWidget call returned");
+}
+
+export function stopPriceWidget(ctx: ExtensionContext): void {
+  plog("stopPriceWidget called");
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(STATS_WIDGET_KEY, undefined);
+}
+
 export function updateStatus(ctx: ExtensionContext, state: VeniceState) {
   if (!ctx.hasUI) return;
 
@@ -455,8 +796,8 @@ export function updateStatus(ctx: ExtensionContext, state: VeniceState) {
   const notActionable = getEnabledButNotActionableFamilies(state).length;
 
   ctx.ui.setStatus(
-    `Venice ${statusLabel} · ${textCount} text · ${state.models.length} total · ${activeJobs} jobs${notActionable ? ` · ${notActionable} future` : ""}`,
     "venice",
+    `Venice ${statusLabel} · ${textCount} text · ${state.models.length} total · ${activeJobs} jobs${notActionable ? ` · ${notActionable} future` : ""}`,
   );
 }
 

@@ -184,6 +184,12 @@ export function latestStateFromEntries(ctx: ExtensionContext): VeniceState {
         : next.config.lastRefreshStatus,
     lastError:
       typeof config.lastError === "string" ? config.lastError : undefined,
+    walletAddress:
+      typeof config.walletAddress === "string" ? config.walletAddress : undefined,
+    widgetPanels:
+      Array.isArray(config.widgetPanels) ? config.widgetPanels.filter((p: any) => typeof p === "string") : undefined,
+    widgetBudget:
+      typeof config.widgetBudget === "number" ? config.widgetBudget : undefined,
   };
 
   next.models = Array.isArray(latest.models)

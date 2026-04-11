@@ -2,7 +2,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 // import { applyExtensionDefaults } from "../themeMap.ts";
 import { registerVeniceCommands } from "./commands.ts";
-import { notify } from "./helpers.ts";
+import { notify, startPriceWidget, stopPriceWidget, tryAcquireWidgetLock, releaseWidgetLock } from "./helpers.ts";
+import { DEFAULT_PANELS } from "./panels.ts";
 import { createVeniceRuntime } from "./runtime.ts";
 import { registerVeniceTools } from "./tools/index.ts";
 
@@ -24,6 +25,27 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (event: any, ctx) => {
     await restoreAndUpdate(ctx);
+
+    // Start the live price widget once per session — never in session_tree
+    // so the polling interval isn't torn down on every conversation change.
+    // Acquire a PID-file lock so only one pi session polls venicestats.com
+    // at a time (60 req/min per-IP limit).
+    if (tryAcquireWidgetLock()) {
+      startPriceWidget(
+        ctx,
+        () => runtime.getState().config.walletAddress ?? process.env["VENICE_WALLET"],
+        () => runtime.getState().config.widgetPanels ?? DEFAULT_PANELS,
+        () => runtime.getState().config.widgetBudget ?? 30,
+      );
+    } else {
+      notify(
+        ctx,
+        "Venice stats widget skipped — another pi session is already polling venicestats.com.\n" +
+        "To enable it here, close the other session first.\n" +
+        "Run /venice-panel reset in the active session to restore the default panels.",
+        "info",
+      );
+    }
 
     const reason = event?.reason;
     const shouldRefreshCatalog =
@@ -50,6 +72,11 @@ export default function (pi: ExtensionAPI) {
         "error",
       );
     }
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    releaseWidgetLock();
+    stopPriceWidget(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {

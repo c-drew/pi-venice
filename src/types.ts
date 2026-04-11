@@ -77,6 +77,9 @@ export interface VeniceState {
     lastRefreshAt?: number;
     lastRefreshStatus: "never" | "ok" | "error";
     lastError?: string;
+    walletAddress?: string;
+    widgetPanels?: string[];
+    widgetBudget?: number;
   };
   models: VeniceModelInfo[];
   videoJobs: Record<string, VeniceVideoJob>;
