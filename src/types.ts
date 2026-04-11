@@ -80,6 +80,9 @@ export interface VeniceState {
     walletAddress?: string;
     widgetPanels?: string[];
     widgetBudget?: number;
+    widgetTimezone?: string;
+    widgetTimeFormat?: "24h" | "12h";
+    billingInterval?: number;
   };
   models: VeniceModelInfo[];
   videoJobs: Record<string, VeniceVideoJob>;

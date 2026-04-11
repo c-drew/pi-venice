@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 // import { applyExtensionDefaults } from "../themeMap.ts";
 import { registerVeniceCommands } from "./commands.ts";
 import { notify, startPriceWidget, stopPriceWidget, tryAcquireWidgetLock, releaseWidgetLock } from "./helpers.ts";
-import { DEFAULT_PANELS } from "./panels.ts";
+import { DEFAULT_PANELS, detectTimezone } from "./panels.ts";
 import { createVeniceRuntime } from "./runtime.ts";
 import { registerVeniceTools } from "./tools/index.ts";
 
@@ -36,6 +36,9 @@ export default function (pi: ExtensionAPI) {
         () => runtime.getState().config.walletAddress ?? process.env["VENICE_WALLET"],
         () => runtime.getState().config.widgetPanels ?? DEFAULT_PANELS,
         () => runtime.getState().config.widgetBudget ?? 30,
+        () => runtime.getState().config.widgetTimezone ?? detectTimezone(),
+        () => runtime.getState().config.widgetTimeFormat ?? "24h",
+        () => runtime.getState().config.billingInterval ?? 30,
       );
     } else {
       notify(

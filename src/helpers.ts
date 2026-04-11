@@ -2,18 +2,24 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } f
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Text, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import {
   PANEL_REGISTRY,
   DEFAULT_PANELS,
   SOURCE_WEIGHTS,
+  BILLING_INTERVAL_DEFAULT,
+  BILLING_INTERVAL_MIN,
+  BILLING_INTERVAL_MAX,
   fmtAddr,
+  renderClock,
+  detectTimezone,
   type AllData,
   type MetricsData,
   type WalletData,
   type SocialData,
   type MarketsData,
   type LiveData,
+  type BillingData,
 } from "./panels.ts";
 
 import {
@@ -22,6 +28,7 @@ import {
   IMPLEMENTED_PROVIDER_FAMILIES,
   IMPLEMENTED_TOOL_FAMILIES,
   USER_CONFIGURABLE_FAMILIES,
+  VENICE_BASE_URL,
 } from "./constants.ts";
 import type {
   DefaultableFamily,
@@ -455,14 +462,18 @@ export function buildStatusSummary(state: VeniceState): string {
 }
 
 // --- Venice stats widget ---------------------------------------------------
-// Dynamic rate allocation: budget of BUDGET_PER_MIN req/min is distributed
-// across active sources proportionally by SOURCE_WEIGHTS.  A single 500ms
-// master ticker fires for every source whose interval has elapsed, so adding
-// or removing panels automatically re-balances the request rate.
+// Two separate polling systems:
 //
-// With all 10 panels enabled the weighted split produces ≈21 req/min.
-// With only the default 3 (prices/protocol/wallet, sources: metrics+wallet)
-// the budget concentrates on those two sources at roughly 47 + 3 req/min.
+// 1. venicestats.com sources share a configurable req/min budget, distributed
+//    proportionally by SOURCE_WEIGHTS.  A 500ms master tick fires each fetcher
+//    only when its computed interval has elapsed.
+//
+// 2. venice.ai /billing/balance uses its own independent timer with a
+//    configurable interval (default 30s), since it's a separate API with
+//    separate rate limits.
+//
+// With all panels enabled the weighted split produces ≈19 req/min on venicestats.com.
+// Billing (venice.ai) uses a separate timer (default 30s).
 
 const STATS_WIDGET_KEY  = "venice-stats";
 const STATS_LOG         = join(homedir(), ".pi", "venice-stats.log");
@@ -535,10 +546,13 @@ function plog(msg: string) {
 }
 
 export function startPriceWidget(
-  ctx:        ExtensionContext,
-  getWallet:  () => string | undefined,
-  getPanels:  () => string[],
-  getBudget:  () => number,
+  ctx:               ExtensionContext,
+  getWallet:         () => string | undefined,
+  getPanels:         () => string[],
+  getBudget:         () => number,
+  getTimezone:       () => string,
+  getTimeFormat:     () => "24h" | "12h",
+  getBillingInterval: () => number,
 ): void {
   plog(`startPriceWidget called — hasUI=${ctx.hasUI}`);
   if (!ctx.hasUI) return;
@@ -549,13 +563,19 @@ export function startPriceWidget(
       plog("widget factory invoked");
 
       // ── data state ────────────────────────────────────────────────────────
-      let metrics:  MetricsData | null = null;
-      let wallet:   WalletData  | null = null;
-      let social:   SocialData  | null = null;
-      let markets:  MarketsData | null = null;
-      let live:     LiveData    | null = null;
+      let metrics:  MetricsData  | null = null;
+      let wallet:   WalletData   | null = null;
+      let social:   SocialData   | null = null;
+      let markets:  MarketsData  | null = null;
+      let live:     LiveData     | null = null;
+      let billing:  BillingData  | null = null;
       let lastWalletAddr: string | undefined;
       let disposed = false;
+
+      // ── clock tick timer (renders every second for UTC + reset countdown) ─
+      const clockTick = setInterval(() => {
+        if (!disposed) tui.requestRender();
+      }, 1000);
 
       // ── flash state (prices panel) ────────────────────────────────────────
       type Flash = "up" | "down" | null;
@@ -576,6 +596,34 @@ export function startPriceWidget(
         if (isVvv) vvvFlashTimer = t; else diemFlashTimer = t;
       }
 
+      // ── billing fetcher (separate API — own timer) ────────────────────
+      // The venice.ai /billing/balance endpoint is not part of venicestats.com
+      // so it uses its own timer separate from the main ticker.
+      async function fetchBilling() {
+        const adminKey = process.env["VENICE_ADMIN_API_KEY"];
+        if (!adminKey) { billing = null; return; }  // no key → no billing data
+        try {
+          const res = await fetch(`${VENICE_BASE_URL}/billing/balance`, {
+            headers: { Authorization: `Bearer ${adminKey}` },
+          });
+          if (!res.ok) {
+            plog(`billing error: ${res.status}`);
+            return;
+          }
+          const d = await res.json() as any;
+          billing = {
+            canConsume: Boolean(d.canConsume),
+            consumptionCurrency: d.consumptionCurrency ?? null,
+            diemBalance: typeof d.balances?.diem === "number" ? d.balances.diem : null,
+            usdBalance: typeof d.balances?.usd === "number" ? d.balances.usd : null,
+            diemEpochAllocation: typeof d.diemEpochAllocation === "number" ? d.diemEpochAllocation : 0,
+          };
+          plog(`billing ok — DIEM=${billing.diemBalance}/${billing.diemEpochAllocation} USD=${billing.usdBalance} canConsume=${billing.canConsume}`);
+          logPanels();
+        } catch (err) { plog(`billing error: ${err}`); }
+        if (!disposed) tui.requestRender();
+      }
+
       // ── panel snapshot logger ─────────────────────────────────────────────
       // Renders every active panel to plain text (strips ANSI) and writes one
       // log line per panel so `tail -f ~/.pi/venice-stats.log` shows the full
@@ -586,9 +634,9 @@ export function startPriceWidget(
           bold: (text: string) => text,
         };
         const allData: AllData = {
-          metrics, wallet, social, markets, live,
+          metrics, wallet, social, markets, live, billing,
           walletAddr: getWallet(),
-          flash: { vvv: null, diem: null },
+          flash: { vvv: vvvFlash, diem: diemFlash },
         };
         for (const id of getPanels()) {
           const panel = PANEL_REGISTRY[id];
@@ -696,9 +744,15 @@ export function startPriceWidget(
       }
 
       // ── dynamic single-ticker polling ─────────────────────────────────────
-      // All sources share a 50 req/min budget split proportionally by weight.
       // The 500ms master tick fires each fetcher only when its computed
-      // interval has elapsed, so adding/removing panels auto-rebalances rates.
+      // interval has elapsed. Two independent scheduling groups share the tick
+      // but not their rate limits:
+      //
+      //   1. venicestats.com sources (metrics/wallet/social/markets/live)
+      //      share the req/min budget distributed by SOURCE_WEIGHTS.
+      //   2. billing (venice.ai /billing/balance) uses its own fixed interval
+      //      from /venice-billing-interval — a different API with a different
+      //      rate limit, so it must not compete for the venicestats budget.
 
       const fetchFns: Record<string, () => Promise<void>> = {
         metrics: fetchMetrics,
@@ -706,9 +760,17 @@ export function startPriceWidget(
         social:  fetchSocial,
         markets: fetchMarkets,
         live:    fetchLive,
+        billing: fetchBilling,
       };
 
       const lastFetch = new Map<string, number>();
+
+      function clampBillingMs(): number {
+        return Math.max(
+          BILLING_INTERVAL_MIN * 1000,
+          Math.min(BILLING_INTERVAL_MAX * 1000, getBillingInterval() * 1000),
+        );
+      }
 
       // Log computed schedule then fire each active source once immediately
       const initSrcs = getActiveSources(getPanels());
@@ -717,18 +779,24 @@ export function startPriceWidget(
         const ms = initIntervals.get(src) ?? 0;
         return `${src}=${(ms / 1000).toFixed(1)}s`;
       });
-      plog(`poll schedule (budget=${getBudget()} req/min, panels=${getPanels().join(",")}): ${scheduleLines.join(" | ")}`);
+      plog(`venicestats schedule (budget=${getBudget()} req/min, panels=${getPanels().join(",")}): ${scheduleLines.join(" | ")}`);
+      plog(`billing schedule: interval=${clampBillingMs() / 1000}s`);
 
       for (const src of initSrcs) {
         fetchFns[src]?.();
         lastFetch.set(src, Date.now());
       }
+      // Fire billing once immediately alongside the venicestats sources
+      fetchFns.billing();
+      lastFetch.set("billing", Date.now());
 
       const ticker = setInterval(() => {
         if (disposed) return;
-        const now          = Date.now();
-        const activeSrcs   = getActiveSources(getPanels());
-        const intervals    = computeIntervals(activeSrcs, getBudget());
+        const now        = Date.now();
+        const activeSrcs = getActiveSources(getPanels());
+        const intervals  = computeIntervals(activeSrcs, getBudget());
+
+        // venicestats sources — budget-driven
         for (const src of activeSrcs) {
           const due = (lastFetch.get(src) ?? 0) + (intervals.get(src) ?? Math.ceil(60_000 / getBudget()));
           if (now >= due) {
@@ -736,17 +804,23 @@ export function startPriceWidget(
             fetchFns[src]?.();
           }
         }
+
+        // billing — independent interval, live-reconfigurable via getBillingInterval()
+        const billingDue = (lastFetch.get("billing") ?? 0) + clampBillingMs();
+        if (now >= billingDue) {
+          lastFetch.set("billing", now);
+          fetchFns.billing();
+        }
       }, TICK_MS);
 
       // ── component ─────────────────────────────────────────────────────────
       return {
         invalidate() {},
 
-        render(_width: number): string[] {
-          if (!metrics) return [];
+        render(width: number): string[] {
           const sep: string = theme.fg("dim", "  ·  ");
           const allData: AllData = {
-            metrics, wallet, social, markets, live,
+            metrics, wallet, social, markets, live, billing,
             walletAddr: getWallet(),
             flash: { vvv: vvvFlash, diem: diemFlash },
           };
@@ -757,6 +831,39 @@ export function startPriceWidget(
             const line = panel.render(allData, theme as any, sep);
             if (line) rows.push(line);
           }
+
+          // Always render the clock overlay (right-aligned on the first row)
+          const clockStr = renderClock(theme, getTimezone(), getTimeFormat(), billing);
+          const clockWidth = visibleWidth(clockStr);
+          const minPadding = 2;
+
+          if (rows.length > 0) {
+            // Append clock to right side of first row
+            const firstRow = rows[0];
+            const firstRowWidth = visibleWidth(firstRow);
+            const totalNeeded = firstRowWidth + minPadding + clockWidth;
+
+            if (totalNeeded <= width) {
+              // Both fit — pad to right-align the clock
+              const padding = " ".repeat(width - firstRowWidth - clockWidth);
+              rows[0] = firstRow + padding + clockStr;
+            } else {
+              // Not enough room for both — truncate first row to make space
+              const availForFirst = width - minPadding - clockWidth;
+              if (availForFirst > 10) {
+                rows[0] = truncateToWidth(firstRow, availForFirst, "") + " ".repeat(minPadding) + clockStr;
+              }
+              // If terminal is too narrow for anything meaningful, leave first row as-is
+            }
+          } else {
+            // No panel rows yet — clock is the only row, right-aligned
+            if (clockWidth < width) {
+              rows.push(" ".repeat(width - clockWidth) + clockStr);
+            } else {
+              rows.push(clockStr);
+            }
+          }
+
           return rows;
         },
 
@@ -764,6 +871,7 @@ export function startPriceWidget(
           plog("dispose() called");
           disposed = true;
           clearInterval(ticker);
+          clearInterval(clockTick);
           if (vvvFlashTimer)  clearTimeout(vvvFlashTimer);
           if (diemFlashTimer) clearTimeout(diemFlashTimer);
         },

@@ -192,12 +192,40 @@ When running in interactive mode (`pi`), the extension renders a live stats widg
 ### Default view
 
 ```
-VVV $8.54  +13.4% 24h  ·  DIEM $1109.77  +17.4% 24h  ·  ETH $2320.86
+VVV $8.5412  +13.4% 24h  ·  DIEM $1109.77  +17.4% 24h  ·  ETH $2320.86      EDT 7:06:02 PM  ·  $0.34 USD  ·  5.00/4.96 DIEM  ·  reset 0h 53m 57s
 MCap $393.4M  ·  Staked 67.8% @ 18.2% APR  ·  Locked 25.9%
 gekko.eth  Consul Dolphin  ·  sVVV 12.1k  ·  DIEM staked 33.14  ·  Pending 92.47 VVV  ·  Rank #18/14.4k
 ```
 
 VVV and DIEM prices flash **green** on uptick and **red** on downtick.
+
+### Clock overlay
+
+A clock is always right-aligned on the first row of the widget, showing your local timezone-aware time. When `VENICE_ADMIN_API_KEY` is set it also shows your Venice billing balance:
+
+- **`$X.XX USD`** — USD balance (only displayed when ≥ $0.01; omitted when exactly 0)
+- **`allocation/balance DIEM`** — DIEM epoch allocation vs. remaining balance, with 2 decimals on both sides. Balance turns **red** when remaining drops below 10% of allocation.
+- **`reset Xh YYm ZZs`** — countdown to the next midnight-UTC DIEM epoch reset.
+
+Without `VENICE_ADMIN_API_KEY` the clock gracefully degrades to just the time.
+
+```bash
+export VENICE_ADMIN_API_KEY="your-venice-admin-key"
+```
+
+**Time / timezone commands:**
+
+```text
+/venice-tz                       ← show current (auto-detected)
+/venice-tz America/New_York      ← set IANA timezone
+/venice-tz reset                 ← restore auto-detection
+/venice-time-format 12h          ← 12-hour time (default is 24h)
+/venice-time-format 24h
+/venice-time-format reset
+/venice-billing-interval         ← show current (default 30s, range 5–600s)
+/venice-billing-interval 60      ← set new interval (takes effect on next tick)
+/venice-billing-interval reset
+```
 
 ### Tracking your wallet
 

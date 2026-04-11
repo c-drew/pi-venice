@@ -190,6 +190,14 @@ export function latestStateFromEntries(ctx: ExtensionContext): VeniceState {
       Array.isArray(config.widgetPanels) ? config.widgetPanels.filter((p: any) => typeof p === "string") : undefined,
     widgetBudget:
       typeof config.widgetBudget === "number" ? config.widgetBudget : undefined,
+    widgetTimezone:
+      typeof config.widgetTimezone === "string" ? config.widgetTimezone : undefined,
+    widgetTimeFormat:
+      config.widgetTimeFormat === "12h" || config.widgetTimeFormat === "24h"
+        ? config.widgetTimeFormat
+        : undefined,
+    billingInterval:
+      typeof config.billingInterval === "number" ? config.billingInterval : undefined,
   };
 
   next.models = Array.isArray(latest.models)

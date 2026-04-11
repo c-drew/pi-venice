@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { PANEL_REGISTRY, PANEL_IDS, DEFAULT_PANELS } from "./panels.ts";
+import { PANEL_REGISTRY, PANEL_IDS, DEFAULT_PANELS, detectTimezone } from "./panels.ts";
 
 import {
   DEFAULTABLE_FAMILIES,
@@ -326,6 +326,105 @@ export function registerVeniceCommands(pi: ExtensionAPI, runtime: VeniceRuntime)
       runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, widgetBudget: n } });
       runtime.saveState();
       notify(ctx, `Polling budget set to ${n} req/min. Takes effect on the next tick.`, "success");
+    },
+  });
+
+  pi.registerCommand("venice-tz", {
+    description: "Show or set the widget timezone (auto-detected by default): /venice-tz [timezone] or /venice-tz reset",
+    handler: async (args, ctx) => {
+      const raw = (args ?? "").trim();
+      const detected = detectTimezone();
+      const current = runtime.getState().config.widgetTimezone ?? detected;
+
+      if (!raw) {
+        const source = runtime.getState().config.widgetTimezone ? "(configured)" : "(auto-detected)";
+        const available = Intl.supportedValuesOf ? Intl.supportedValuesOf("timeZone") : undefined;
+        let msg = `Widget timezone: ${current} ${source}`;
+        if (available) msg += `\nAuto-detected: ${detected}`;
+        msg += `\n\nUsage: /venice-tz <IANA timezone> to set, /venice-tz reset to clear.`;
+        notify(ctx, msg, "info");
+        return;
+      }
+
+      if (raw === "reset") {
+        runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, widgetTimezone: undefined } });
+        runtime.saveState();
+        notify(ctx, `Timezone reset to auto-detected: ${detected}`, "success");
+        return;
+      }
+
+      // Validate the timezone by trying to format with it
+      try {
+        new Date().toLocaleString("en-US", { timeZone: raw, timeZoneName: "short" });
+      } catch {
+        notify(ctx, `Invalid timezone "${raw}". Use an IANA timezone like "America/New_York" or "UTC".`, "error");
+        return;
+      }
+
+      runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, widgetTimezone: raw } });
+      runtime.saveState();
+      notify(ctx, `Widget timezone set to ${raw} (was ${current})`, "success");
+    },
+  });
+
+  pi.registerCommand("venice-time-format", {
+    description: "Show or set the widget time format (24h or 12h, default 24h): /venice-time-format [24h|12h|reset]",
+    handler: async (args, ctx) => {
+      const raw = (args ?? "").trim().toLowerCase();
+      const current = runtime.getState().config.widgetTimeFormat ?? "24h";
+
+      if (!raw) {
+        const source = runtime.getState().config.widgetTimeFormat ? "(configured)" : "(default)";
+        notify(ctx, `Widget time format: ${current} ${source}\nUsage: /venice-time-format 12h or /venice-time-format 24h or /venice-time-format reset`, "info");
+        return;
+      }
+
+      if (raw === "reset") {
+        runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, widgetTimeFormat: undefined } });
+        runtime.saveState();
+        notify(ctx, `Time format reset to default (24h).`, "success");
+        return;
+      }
+
+      if (raw !== "12h" && raw !== "24h") {
+        notify(ctx, `Invalid format "${raw}". Use 12h or 24h.`, "error");
+        return;
+      }
+
+      runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, widgetTimeFormat: raw } });
+      runtime.saveState();
+      notify(ctx, `Time format set to ${raw} (was ${current})`, "success");
+    },
+  });
+
+  pi.registerCommand("venice-billing-interval", {
+    description: "Show or set the billing poll interval in seconds (5–600, default 30): /venice-billing-interval [5-600|reset]",
+    handler: async (args, ctx) => {
+      const raw = (args ?? "").trim();
+      const current = runtime.getState().config.billingInterval ?? 30;
+
+      if (!raw) {
+        const source = runtime.getState().config.billingInterval ? "(configured)" : "(default)";
+        notify(ctx, `Billing poll interval: ${current}s ${source}\nUsage: /venice-billing-interval <5-600> or /venice-billing-interval reset`, "info");
+        return;
+      }
+
+      if (raw === "reset") {
+        runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, billingInterval: undefined } });
+        runtime.saveState();
+        notify(ctx, `Billing poll interval reset to default (30s).`, "success");
+        return;
+      }
+
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 5 || n > 600) {
+        notify(ctx, `Invalid interval "${raw}". Provide a number between 5 and 600 seconds.`, "error");
+        return;
+      }
+
+      runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, billingInterval: Math.round(n) } });
+      runtime.saveState();
+      notify(ctx, `Billing poll interval set to ${Math.round(n)}s (was ${current}s). Takes effect on the next tick.`, "success");
     },
   });
 }

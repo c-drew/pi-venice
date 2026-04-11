@@ -73,6 +73,14 @@ export interface LiveData {
   timestamp: string;
 }
 
+export interface BillingData {
+  canConsume: boolean;
+  consumptionCurrency: string | null;
+  diemBalance: number | null;
+  usdBalance: number | null;
+  diemEpochAllocation: number;
+}
+
 export interface AllData {
   metrics: MetricsData | null;
   wallet: WalletData | null;
@@ -80,6 +88,7 @@ export interface AllData {
   social: SocialData | null;
   markets: MarketsData | null;
   live: LiveData | null;
+  billing: BillingData | null;
   flash: { vvv: "up" | "down" | null; diem: "up" | "down" | null };
 }
 
@@ -134,6 +143,8 @@ export function fmtAge(ts: string): string {
  * Higher weight = larger share of the 50 req/min budget.
  * These are used by helpers.ts to compute per-source intervals dynamically.
  */
+// Source weights for venicestats.com only. Billing (venice.ai API) uses a
+// separate timer with its own configurable interval.
 export const SOURCE_WEIGHTS: Record<string, number> = {
   metrics: 10, // backbone — prices + all protocol KPIs
   live:     5, // real-time on-chain events
@@ -141,6 +152,13 @@ export const SOURCE_WEIGHTS: Record<string, number> = {
   wallet:   1, // Venetian wallet data (changes slowly)
   social: 0.5, // social signals (changes very slowly)
 };
+
+/** Default billing poll interval in seconds. */
+export const BILLING_INTERVAL_DEFAULT = 30;
+/** Minimum billing poll interval in seconds. */
+export const BILLING_INTERVAL_MIN = 5;
+/** Maximum billing poll interval in seconds. */
+export const BILLING_INTERVAL_MAX = 600;
 
 export interface PanelDef {
   id: string;
@@ -162,6 +180,123 @@ export interface PanelDef {
 // ---------------------------------------------------------------------------
 // Panel registry — add new panels here
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Clock overlay (not a panel — always rendered right-aligned on first row)
+// ---------------------------------------------------------------------------
+
+/**
+ * Auto-detect the system timezone using Intl. Falls back to "UTC".
+ */
+export function detectTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * Get a short timezone abbreviation (e.g. "EST", "PST", "CET").
+ */
+function getTzAbbr(tz: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "short" })
+      .formatToParts(new Date());
+    return parts.find(p => p.type === "timeZoneName")?.value ?? tz.split("/").pop() ?? "???";
+  } catch {
+    return tz.split("/").pop() ?? "???";
+  }
+}
+
+/**
+ * Render the clock line that appears right-aligned on the top row of the widget.
+ *
+ * When billing data is present, shows:
+ *   TZAbbrev HH:MM:SS  ·  allocation/balance DIEM  ·  reset Xh XXm XXs
+ * When billing data is absent (no VENICE_ADMIN_API_KEY), shows just:
+ *   TZAbbrev HH:MM:SS
+ *
+ * The DIEM reset countdown and balance segment are only shown when we actually
+ * have billing data — they're irrelevant without a staking account.
+ */
+export function renderClock(
+  theme: MiniTheme,
+  timezone: string,
+  timeFormat: "24h" | "12h",
+  billing?: BillingData | null,
+): string {
+  const now = new Date();
+  const use12h = timeFormat === "12h";
+
+  // Format current time in the user's chosen timezone
+  let timeStr: string;
+  let tzAbbr: string;
+  try {
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: timezone,
+      hour12: use12h,
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    };
+    timeStr = now.toLocaleTimeString("en-US", options);
+    tzAbbr = getTzAbbr(timezone);
+  } catch {
+    // Invalid timezone — fall back to UTC
+    const hh = String(now.getUTCHours()).padStart(2, "0");
+    const mm = String(now.getUTCMinutes()).padStart(2, "0");
+    const ss = String(now.getUTCSeconds()).padStart(2, "0");
+    timeStr = use12h
+      ? `${now.getUTCHours() % 12 || 12}:${mm}:${ss} ${now.getUTCHours() >= 12 ? "PM" : "AM"}`
+      : `${hh}:${mm}:${ss}`;
+    tzAbbr = "UTC";
+  }
+
+  // If no billing data, show just the time — no DIEM info, no reset countdown
+  if (!billing || (billing.diemBalance === null && billing.usdBalance === null)) {
+    return theme.fg("dim", tzAbbr + " ") + theme.fg("text", timeStr);
+  }
+
+  const parts: string[] = [
+    theme.fg("dim", tzAbbr + " ") + theme.fg("text", timeStr),
+  ];
+
+  // USD balance — sits between time and DIEM. Only shown when >= $0.01.
+  if (billing.usdBalance !== null && billing.usdBalance >= 0.01) {
+    parts.push(
+      theme.fg("dim", "$") + theme.fg("text", billing.usdBalance.toFixed(2)) +
+      theme.fg("dim", " USD")
+    );
+  }
+
+  // DIEM balance (allocation/balance DIEM) + epoch reset countdown.
+  // Red when remaining balance is below 10% of allocation.
+  if (billing.diemBalance !== null) {
+    const remainingPct = billing.diemEpochAllocation > 0
+      ? (billing.diemBalance / billing.diemEpochAllocation) * 100
+      : 100;
+    const diemColor = remainingPct < 10 ? "error" : "text";
+    parts.push(
+      theme.fg(diemColor, billing.diemEpochAllocation.toFixed(2)) +
+      theme.fg("dim", "/") +
+      theme.fg(diemColor, billing.diemBalance.toFixed(2)) +
+      theme.fg("dim", " DIEM")
+    );
+
+    // Countdown to midnight UTC (DIEM epoch reset)
+    const midnight = new Date(now);
+    midnight.setUTCHours(24, 0, 0, 0);
+    const diffMs = midnight.getTime() - now.getTime();
+    const diffH = Math.floor(diffMs / 3_600_000);
+    const diffM = Math.floor((diffMs % 3_600_000) / 60_000);
+    const diffS = Math.floor((diffMs % 60_000) / 1_000);
+    const resetStr = `${diffH}h ${String(diffM).padStart(2, "0")}m ${String(diffS).padStart(2, "0")}s`;
+    parts.push(theme.fg("dim", "reset ") + theme.fg("accent", resetStr));
+  }
+
+  return parts.join(theme.fg("dim", "  ·  "));
+}
 
 export const PANEL_REGISTRY: Record<string, PanelDef> = {
 
