@@ -640,7 +640,8 @@ export function startPriceWidget(
           const panel = PANEL_REGISTRY[id];
           if (!panel) continue;
           const line = panel.render(allData, noTheme, " · ");
-          if (line) plog(`panel[${id}] ${line}`);
+          if (Array.isArray(line)) line.forEach((l, i) => plog(`panel[${id}][${i}] ${l}`));
+          else if (line) plog(`panel[${id}] ${line}`);
         }
       }
 
@@ -810,7 +811,8 @@ export function startPriceWidget(
             const panel = PANEL_REGISTRY[id];
             if (!panel) continue;
             const line = panel.render(allData, theme as any, sep);
-            if (line) rows.push(line);
+            if (Array.isArray(line)) rows.push(...line);
+            else if (line) rows.push(line);
           }
 
           // Always render the clock overlay (right-aligned on the first row)

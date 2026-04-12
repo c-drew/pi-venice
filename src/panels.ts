@@ -166,7 +166,7 @@ export interface PanelDef {
    * Render to a single terminal line. Return null to hide the row (e.g. data not
    * yet loaded). The sep helper produces the themed mid-dot separator.
    */
-  render(data: AllData, theme: MiniTheme, sep: string): string | null;
+  render(data: AllData, theme: MiniTheme, sep: string): string | string[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +344,7 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
         theme.fg(diemColor, `$${metrics.diemPrice.toFixed(2)}`) +
         theme.fg(diemChg,   ` ${fmtPct(metrics.diemPriceChange24h)} 24h`) +
         sep +
-        theme.fg("dim",  "ETH ") + theme.fg("text", `$${metrics.ethPrice.toFixed(2)}`) +
-        sep +
-        theme.fg("dim",  "1 VVV = ") + theme.fg("text", `${(metrics.vvvPrice / metrics.diemPrice).toFixed(4)} DIEM`)
+        theme.fg("dim",  "ETH ") + theme.fg("text", `$${metrics.ethPrice.toFixed(2)}`)
       );
     },
   },
@@ -385,21 +383,22 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
       }
       const roleColor = ROLE_COLOR[wallet.role] ?? "dim";
       const emoji     = SIZE_EMOJI[wallet.sizeLabel] ?? "";
-      return (
+      const line1 =
         theme.fg("accent", wallet.label) +
-        (wallet.role      ? theme.fg(roleColor, `  ${wallet.role}`)                         : "") +
+        (wallet.role      ? theme.fg(roleColor, `  ${wallet.role}`)                              : "") +
         (wallet.sizeLabel ? theme.fg("dim",     ` ${wallet.sizeLabel}${emoji ? " " + emoji : ""}`) : "") +
+        (metrics ? sep + theme.fg("dim", "Portfolio ") + theme.fg("text", fmtUSD(wallet.svvvBalance * metrics.vvvPrice)) : "") +
         sep +
+        theme.fg("dim", "Rank #")  + theme.fg("text", String(wallet.rank)) +
+        theme.fg("dim", `/${fmtK(wallet.totalVenetians)}`);
+      const line2 =
+        theme.fg("dim", " - ") +
         theme.fg("dim", "sVVV ")         + theme.fg("text", fmtNum4(wallet.svvvBalance)) +
         sep +
         theme.fg("dim", "DIEM staked ")  + theme.fg("text", wallet.diemStaked.toFixed(2)) +
         sep +
-        theme.fg("dim", "Pending ")      + theme.fg("success", `${wallet.pendingRewards.toFixed(2)} VVV`) +
-        (metrics ? sep + theme.fg("dim", "Portfolio ") + theme.fg("text", fmtUSD(wallet.svvvBalance * metrics.vvvPrice)) : "") +
-        sep +
-        theme.fg("dim", "Rank #")        + theme.fg("text", String(wallet.rank)) +
-        theme.fg("dim", `/${fmtK(wallet.totalVenetians)}`)
-      );
+        theme.fg("dim", "Pending ")      + theme.fg("success", `${wallet.pendingRewards.toFixed(2)} VVV`);
+      return [line1, line2];
     },
   },
 
