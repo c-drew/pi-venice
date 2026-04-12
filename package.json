@@ -22,7 +22,8 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "npm:pi-venice-stats"
     ]
   },
   "keywords": [
@@ -38,12 +39,15 @@
     "provider"
   ],
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
     "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "pi-venice-stats": "^0.1.0"
   }
 }

@@ -77,12 +77,6 @@ export interface VeniceState {
     lastRefreshAt?: number;
     lastRefreshStatus: "never" | "ok" | "error";
     lastError?: string;
-    walletAddress?: string;
-    widgetPanels?: string[];
-    widgetBudget?: number;
-    widgetTimezone?: string;
-    widgetTimeFormat?: "24h" | "12h";
-    billingInterval?: number;
   };
   models: VeniceModelInfo[];
   videoJobs: Record<string, VeniceVideoJob>;
