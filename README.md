@@ -255,6 +255,7 @@ The dashboard is built from composable panels. Each panel is a single row.
 **Add / remove / reorder:**
 ```text
 /venice-panel add <id>
+/venice-panel add all      ← enable every available panel
 /venice-panel remove <id>
 /venice-panel move <id> up
 /venice-panel move <id> down
@@ -268,12 +269,11 @@ The dashboard is built from composable panels. Each panel is a single row.
 | `prices` | Prices | VVV + DIEM + ETH spot prices with 24h % change. Prices flash on tick. | `/api/metrics` every 5s |
 | `protocol` | Protocol | Market cap, staking ratio, APR, sVVV lock ratio | `/api/metrics` every 5s |
 | `wallet` | Wallet | Your Venetian: sVVV staked, DIEM staked, pending rewards, role and rank | `/api/venetians` every 60s |
-| `diem` | DIEM | DIEM supply, daily mint rate, days until cap, stake ratio | `/api/metrics` every 5s |
+| `diem` | DIEM | DIEM supply, mint rate (sVVV), remaining mintable supply, stake ratio | `/api/metrics` every 5s |
 | `social` | Social | Erik Voorhees followers, CoinGecko sentiment %, VVV + DIEM market cap ranks | `/api/social` every 5m |
 | `burns` | Burns | Total VVV burned, organic burn volume, annual deflation rate | `/api/metrics` every 5s |
 | `staking` | Staking | New stakers (7d), 7-day staking growth, VVV in cooldown | `/api/metrics` every 5s |
 | `markets` | Markets | VVV DEX 24h volume, buy %, unique trader count | `/api/markets` every 30s |
-| `live` | Live | Most recent on-chain event (swap, stake, DIEM mint/burn) | `/api/live` every 10s |
 | `revenue` | Revenue | Venice protocol revenue to date, annualized burn revenue, emission rate | `/api/metrics` every 5s |
 
 **Dynamic rate allocation** — the extension targets a configurable budget (default **30 req/min**, range **1–59**), shared automatically across whichever data sources your active panels need.
@@ -288,14 +288,13 @@ The dashboard is built from composable panels. Each panel is a single row.
 
 A single 500 ms master ticker fires each source only when its computed interval has elapsed. Sources are weighted by how time-sensitive they are:
 
-| Source | Weight | 3 panels @ 30 req/min | All 10 panels @ 30 req/min |
-|--------|--------|----------------------|---------------------------|
-| `/api/metrics` | 10 | ~27 req/min (2.2s) | ~16 req/min (3.8s) |
-| `/api/live` | 5 | — | ~8 req/min (7.5s) |
-| `/api/markets` | 2 | — | ~3 req/min (18s) |
-| `/api/wallet` | 1 | ~3 req/min (20s) | ~2 req/min (37s) |
-| `/api/social` | 0.5 | — | ~1 req/min (75s) |
-| **Total** | | **~30 req/min** | **~30 req/min** |
+| Source | Weight | 3 panels @ 30 req/min | All 9 panels @ 30 req/min |
+|--------|--------|----------------------|--------------------------|
+| `/api/metrics` | 10 | ~27 req/min (2.2s) | ~18 req/min (3.3s) |
+| `/api/markets` | 2 | — | ~4 req/min (16s) |
+| `/api/wallet` | 1 | ~3 req/min (20s) | ~2 req/min (32s) |
+| `/api/social` | 0.5 | — | ~1 req/min (63s) |
+| **Total** | | **~30 req/min** | **~25 req/min** |
 
 - Panels that are disabled make **zero requests**.
 - Adding panels shifts budget away from currently active sources — total stays near your configured budget.

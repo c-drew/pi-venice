@@ -27,7 +27,7 @@ export interface MetricsData {
   lockRatio: number;
   mintRate: number;
   diemSupply: number;
-  daysUntilDiemCap: number;
+  remainingMintable: number;
   diemStakeRatio: number;
   stakingGrowth7d: number;
   newStakers7dCount: number;
@@ -65,14 +65,6 @@ export interface MarketsData {
   traders: number;
 }
 
-export interface LiveData {
-  type: string;
-  source: string;
-  amount: number;
-  address: string;
-  timestamp: string;
-}
-
 export interface BillingData {
   canConsume: boolean;
   consumptionCurrency: string | null;
@@ -87,7 +79,6 @@ export interface AllData {
   walletAddr: string | undefined;
   social: SocialData | null;
   markets: MarketsData | null;
-  live: LiveData | null;
   billing: BillingData | null;
   flash: { vvv: "up" | "down" | null; diem: "up" | "down" | null };
 }
@@ -123,16 +114,18 @@ export function fmtK(n: number): string {
   return String(Math.round(n));
 }
 
+/** 4-significant-digit formatter with comma thousands separator.
+ *  3300 → "3,300"  |  12345 → "12,345"  |  1023456 → "1.023M"
+ */
+export function fmtNum4(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(3)}M`;
+  return Math.round(n).toLocaleString("en-US");
+}
+
 export function fmtAddr(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-export function fmtAge(ts: string): string {
-  const secs = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-  return `${Math.floor(secs / 3600)}h ago`;
-}
 
 // ---------------------------------------------------------------------------
 // Panel definition type
@@ -147,7 +140,6 @@ export function fmtAge(ts: string): string {
 // separate timer with its own configurable interval.
 export const SOURCE_WEIGHTS: Record<string, number> = {
   metrics: 10, // backbone — prices + all protocol KPIs
-  live:     5, // real-time on-chain events
   markets:  2, // DEX aggregates
   wallet:   1, // Venetian wallet data (changes slowly)
   social: 0.5, // social signals (changes very slowly)
@@ -176,6 +168,35 @@ export interface PanelDef {
    */
   render(data: AllData, theme: MiniTheme, sep: string): string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Venetian tier lookups (wallet panel)
+// ---------------------------------------------------------------------------
+
+const SIZE_EMOJI: Record<string, string> = {
+  Leviathan:  "🐉",
+  Whale:      "🐋",
+  Shark:      "🦈",
+  Crocodile:  "🐊",
+  Dolphin:    "🐬",
+  Barracuda:  "🐟",
+  Octopus:    "🐙",
+  Squid:      "🦑",
+  Crab:       "🦀",
+  Pufferfish: "🐡",
+  Shrimp:     "🦐",
+  Plankton:   "🫧",
+};
+
+const ROLE_COLOR: Record<string, string> = {
+  Mercenary:  "error",    // red
+  Gondolier:  "muted",    // lighter grey
+  Glassblower:"accent",   // blue
+  Merchant:   "syntaxType",  // teal — no true purple in the theme palette
+  Patrician:  "warning",  // yellow
+  Consul:     "warning",  // yellow
+  Illuminati: "warning",  // yellow
+};
 
 // ---------------------------------------------------------------------------
 // Panel registry — add new panels here
@@ -276,12 +297,14 @@ export function renderClock(
     const remainingPct = billing.diemEpochAllocation > 0
       ? (billing.diemBalance / billing.diemEpochAllocation) * 100
       : 100;
+    const usedDiem  = billing.diemEpochAllocation - billing.diemBalance;
     const diemColor = remainingPct < 10 ? "error" : "text";
     parts.push(
-      theme.fg(diemColor, billing.diemEpochAllocation.toFixed(2)) +
-      theme.fg("dim", "/") +
-      theme.fg(diemColor, billing.diemBalance.toFixed(2)) +
-      theme.fg("dim", " DIEM")
+      theme.fg("dim", "DIEM Balance ") +
+      theme.fg(diemColor, usedDiem.toFixed(2)) +
+      theme.fg("dim", " / ") +
+      theme.fg("text", billing.diemEpochAllocation.toFixed(2)) +
+      theme.fg("dim", " used")
     );
 
     // Countdown to midnight UTC (DIEM epoch reset)
@@ -321,7 +344,9 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
         theme.fg(diemColor, `$${metrics.diemPrice.toFixed(2)}`) +
         theme.fg(diemChg,   ` ${fmtPct(metrics.diemPriceChange24h)} 24h`) +
         sep +
-        theme.fg("dim",  "ETH ") + theme.fg("text", `$${metrics.ethPrice.toFixed(2)}`)
+        theme.fg("dim",  "ETH ") + theme.fg("text", `$${metrics.ethPrice.toFixed(2)}`) +
+        sep +
+        theme.fg("dim",  "1 VVV = ") + theme.fg("text", `${(metrics.vvvPrice / metrics.diemPrice).toFixed(4)} DIEM`)
       );
     },
   },
@@ -351,23 +376,26 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
     label: "Wallet",
     description: "Your Venetian: sVVV staked, DIEM staked, pending rewards, role and rank. Set address with /venice-wallet <0x…>.",
     sources: ["wallet"] as Array<keyof typeof SOURCE_WEIGHTS>,
-    render({ wallet, walletAddr }, theme, sep) {
+    render({ wallet, walletAddr, metrics }, theme, sep) {
       if (!walletAddr) {
         return theme.fg("dim", "Wallet: /venice-wallet <0x…> or VENICE_WALLET=0x…");
       }
       if (!wallet) {
         return theme.fg("dim", `Loading ${fmtAddr(walletAddr)}…`);
       }
+      const roleColor = ROLE_COLOR[wallet.role] ?? "dim";
+      const emoji     = SIZE_EMOJI[wallet.sizeLabel] ?? "";
       return (
         theme.fg("accent", wallet.label) +
-        (wallet.role      ? theme.fg("dim", `  ${wallet.role}`)      : "") +
-        (wallet.sizeLabel ? theme.fg("dim", ` ${wallet.sizeLabel}`)  : "") +
+        (wallet.role      ? theme.fg(roleColor, `  ${wallet.role}`)                         : "") +
+        (wallet.sizeLabel ? theme.fg("dim",     ` ${wallet.sizeLabel}${emoji ? " " + emoji : ""}`) : "") +
         sep +
-        theme.fg("dim", "sVVV ")         + theme.fg("text", fmtK(wallet.svvvBalance)) +
+        theme.fg("dim", "sVVV ")         + theme.fg("text", fmtNum4(wallet.svvvBalance)) +
         sep +
         theme.fg("dim", "DIEM staked ")  + theme.fg("text", wallet.diemStaked.toFixed(2)) +
         sep +
         theme.fg("dim", "Pending ")      + theme.fg("success", `${wallet.pendingRewards.toFixed(2)} VVV`) +
+        (metrics ? sep + theme.fg("dim", "Portfolio ") + theme.fg("text", fmtUSD(wallet.svvvBalance * metrics.vvvPrice)) : "") +
         sep +
         theme.fg("dim", "Rank #")        + theme.fg("text", String(wallet.rank)) +
         theme.fg("dim", `/${fmtK(wallet.totalVenetians)}`)
@@ -384,13 +412,13 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
     render({ metrics }, theme, sep) {
       if (!metrics) return null;
       return (
-        theme.fg("dim",  "Supply ")    + theme.fg("text", fmtK(metrics.diemSupply)) +
+        theme.fg("dim",  "DIEM Supply ")    + theme.fg("text", fmtK(metrics.diemSupply)) +
         sep +
-        theme.fg("dim",  "Mint ")      + theme.fg("text", `${metrics.mintRate.toFixed(0)}/day`) +
+        theme.fg("dim",  "Mint Rate ")     + theme.fg("text", `${metrics.mintRate.toFixed(2)} sVVV`) +
         sep +
-        theme.fg("dim",  "Cap in ")    + theme.fg("text", `${metrics.daysUntilDiemCap}d`) +
+        theme.fg("dim",  "Remaining Mintable ") + theme.fg("text", fmtK(metrics.remainingMintable)) +
         sep +
-        theme.fg("dim",  "Staked ")    + theme.fg("text", `${(metrics.diemStakeRatio * 100).toFixed(1)}%`)
+        theme.fg("dim",  "Staked ")        + theme.fg("text", `${(metrics.diemStakeRatio * 100).toFixed(1)}%`)
       );
     },
   },
@@ -405,12 +433,11 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
       if (!social) return null;
       const sentColor = social.sentimentUpPct >= 50 ? "success" : "error";
       return (
-        theme.fg("dim",      "Erik ")       + theme.fg("text", fmtK(social.erikFollowers)) +
-        theme.fg("dim",      " followers")  +
+        theme.fg("dim",      "Erik Voorhees ") + theme.fg("text", fmtK(social.erikFollowers)) +
         sep +
         theme.fg("dim",      "Sentiment ")  + theme.fg(sentColor, `${social.sentimentUpPct.toFixed(0)}% ↑`) +
         sep +
-        theme.fg("dim",      "VVV #")       + theme.fg("text", String(social.marketCapRank)) +
+        theme.fg("dim",      "MCap #")      + theme.fg("text", String(social.marketCapRank)) +
         sep +
         theme.fg("dim",      "DIEM #")      + theme.fg("text", String(social.diemMarketCapRank))
       );
@@ -428,7 +455,7 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
       return (
         theme.fg("dim",  "Burned ")   + theme.fg("text", fmtK(metrics.totalBurnedFromEvents) + " VVV") +
         sep +
-        theme.fg("dim",  "Organic ")  + theme.fg("text", fmtK(metrics.organicBurned) + " VVV") +
+        theme.fg("dim",  "Organic Burn ")  + theme.fg("text", fmtK(metrics.organicBurned) + " VVV") +
         sep +
         theme.fg("dim",  "Deflation ") + theme.fg("text", `${metrics.burnDeflationRate.toFixed(2)}%/yr`)
       );
@@ -446,9 +473,9 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
       const growthColor = metrics.stakingGrowth7d >= 1 ? "success" : "error";
       const growthPct   = (metrics.stakingGrowth7d - 1) * 100;
       return (
-        theme.fg("dim",        "New stakers 7d ") + theme.fg("text", String(metrics.newStakers7dCount)) +
+        theme.fg("text", String(metrics.newStakers7dCount)) + theme.fg("dim", " New Stakers (7d)") +
         sep +
-        theme.fg("dim",        "Growth ")         + theme.fg(growthColor, fmtPct(growthPct)) +
+        theme.fg("dim",        "7d Growth ")      + theme.fg(growthColor, fmtPct(growthPct)) +
         sep +
         theme.fg("dim",        "Cooldown ")        + theme.fg("text", `${fmtK(metrics.cooldownVvv)} VVV`)
       );
@@ -474,26 +501,6 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
     },
   },
 
-  // ── live ──────────────────────────────────────────────────────────────────
-  live: {
-    id: "live",
-    label: "Live",
-    description: "Most recent on-chain event (swap, stake, DIEM mint/burn).",
-    sources: ["live"] as Array<keyof typeof SOURCE_WEIGHTS>,
-    render({ live }, theme, sep) {
-      if (!live) return null;
-      const label = live.type.replace(/_/g, " ");
-      const amt   = live.amount > 0 ? ` ${live.amount.toFixed(2)}` : "";
-      const token = live.type.includes("diem") ? " DIEM" : " VVV";
-      const who   = live.address ? ` ${fmtAddr(live.address)}` : "";
-      return (
-        theme.fg("accent", "● ") +
-        theme.fg("text",   label + amt + token + who) +
-        theme.fg("dim",    `  ${fmtAge(live.timestamp)}`)
-      );
-    },
-  },
-
   // ── revenue ───────────────────────────────────────────────────────────────
   revenue: {
     id: "revenue",
@@ -505,9 +512,9 @@ export const PANEL_REGISTRY: Record<string, PanelDef> = {
       return (
         theme.fg("dim",  "Revenue ")    + theme.fg("text", fmtUSD(metrics.veniceRevenue)) +
         sep +
-        theme.fg("dim",  "Annualized ") + theme.fg("text", fmtUSD(metrics.burnRevenueAnnualized)) +
+        theme.fg("dim",  "Ann. Revenue ") + theme.fg("text", fmtUSD(metrics.burnRevenueAnnualized)) +
         sep +
-        theme.fg("dim",  "Emission ")   + theme.fg("text", `${(metrics.emissionRate * 100).toFixed(1)}%/yr`)
+        theme.fg("dim",  "VVV Emission ") + theme.fg("text", `${(metrics.emissionRate * 100).toFixed(1)}%/yr`)
       );
     },
   },

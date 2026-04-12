@@ -18,7 +18,6 @@ import {
   type WalletData,
   type SocialData,
   type MarketsData,
-  type LiveData,
   type BillingData,
 } from "./panels.ts";
 
@@ -567,7 +566,6 @@ export function startPriceWidget(
       let wallet:   WalletData   | null = null;
       let social:   SocialData   | null = null;
       let markets:  MarketsData  | null = null;
-      let live:     LiveData     | null = null;
       let billing:  BillingData  | null = null;
       let lastWalletAddr: string | undefined;
       let disposed = false;
@@ -634,7 +632,7 @@ export function startPriceWidget(
           bold: (text: string) => text,
         };
         const allData: AllData = {
-          metrics, wallet, social, markets, live, billing,
+          metrics, wallet, social, markets, billing,
           walletAddr: getWallet(),
           flash: { vvv: vvvFlash, diem: diemFlash },
         };
@@ -661,7 +659,7 @@ export function startPriceWidget(
             marketCap: d.marketCap ?? 0, stakingRatio: (d.stakingRatio ?? 0) * 100,
             stakerApr: d.stakerApr ?? 0, lockRatio: (d.lockRatio ?? 0) * 100,
             mintRate: d.mintRate ?? 0, diemSupply: d.diemSupply ?? 0,
-            daysUntilDiemCap: d.daysUntilDiemCap ?? 0, diemStakeRatio: d.diemStakeRatio ?? 0,
+            remainingMintable: d.remainingMintable ?? 0, diemStakeRatio: d.diemStakeRatio ?? 0,
             stakingGrowth7d: d.stakingGrowth7d ?? 1, newStakers7dCount: d.newStakers7dCount ?? 0,
             cooldownVvv: d.cooldownVvv ?? 0, veniceRevenue: d.veniceRevenue ?? 0,
             burnRevenueAnnualized: d.burnRevenueAnnualized ?? 0,
@@ -727,22 +725,6 @@ export function startPriceWidget(
         if (!disposed) tui.requestRender();
       }
 
-      async function fetchLive() {
-        if (!getPanels().includes("live")) return;
-        try {
-          const res = await fetch("https://venicestats.com/api/live?limit=1");
-          if (!res.ok) return;
-          const d = await res.json() as any;
-          const ev = d.events?.[0];
-          if (ev) {
-            live = { type: ev.type, source: ev.source, amount: ev.amount ?? 0, address: ev.address ?? "", timestamp: ev.timestamp };
-            plog(`live ok — ${live.type} ${live.amount.toFixed(2)} ${live.address ? fmtAddr(live.address) : ""}`);
-            logPanels();
-          }
-        } catch (err) { plog(`live error: ${err}`); }
-        if (!disposed) tui.requestRender();
-      }
-
       // ── dynamic single-ticker polling ─────────────────────────────────────
       // The 500ms master tick fires each fetcher only when its computed
       // interval has elapsed. Two independent scheduling groups share the tick
@@ -759,7 +741,6 @@ export function startPriceWidget(
         wallet:  fetchWallet,
         social:  fetchSocial,
         markets: fetchMarkets,
-        live:    fetchLive,
         billing: fetchBilling,
       };
 
@@ -820,7 +801,7 @@ export function startPriceWidget(
         render(width: number): string[] {
           const sep: string = theme.fg("dim", "  ·  ");
           const allData: AllData = {
-            metrics, wallet, social, markets, live, billing,
+            metrics, wallet, social, markets, billing,
             walletAddr: getWallet(),
             flash: { vvv: vvvFlash, diem: diemFlash },
           };

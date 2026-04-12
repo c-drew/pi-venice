@@ -211,6 +211,12 @@ export function registerVeniceCommands(pi: ExtensionAPI, runtime: VeniceRuntime)
 
       if (action === "add") {
         const id = parts[1];
+        if (id === "all") {
+          const next = [...current, ...PANEL_IDS.filter(p => !current.includes(p))];
+          save(next);
+          notify(ctx, `All panels enabled. Dashboard: ${next.join(", ")}`, "success");
+          return;
+        }
         if (!id || !PANEL_REGISTRY[id]) {
           notify(ctx, `Unknown panel "${id ?? ""}". Run /venice-panels to see available panels.`, "error");
           return;
