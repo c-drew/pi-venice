@@ -15,7 +15,19 @@ export default function (pi: ExtensionAPI) {
   // model scope, before the async session_start event fires.
   runtime.eagerRegisterProvider();
 
-  registerVeniceCommands(pi, runtime);
+  const startWidget = (ctx: any) => {
+    startPriceWidget(
+      ctx,
+      () => runtime.getState().config.walletAddress ?? process.env["VENICE_WALLET"],
+      () => runtime.getState().config.widgetPanels ?? DEFAULT_PANELS,
+      () => runtime.getState().config.widgetBudget ?? 30,
+      () => runtime.getState().config.widgetTimezone ?? detectTimezone(),
+      () => runtime.getState().config.widgetTimeFormat ?? "24h",
+      () => runtime.getState().config.billingInterval ?? 30,
+    );
+  };
+
+  registerVeniceCommands(pi, runtime, startWidget);
   registerVeniceTools(pi, runtime);
 
   const restoreAndUpdate = async (ctx: any) => {
@@ -31,21 +43,12 @@ export default function (pi: ExtensionAPI) {
     // Acquire a PID-file lock so only one pi session polls venicestats.com
     // at a time (60 req/min per-IP limit).
     if (tryAcquireWidgetLock()) {
-      startPriceWidget(
-        ctx,
-        () => runtime.getState().config.walletAddress ?? process.env["VENICE_WALLET"],
-        () => runtime.getState().config.widgetPanels ?? DEFAULT_PANELS,
-        () => runtime.getState().config.widgetBudget ?? 30,
-        () => runtime.getState().config.widgetTimezone ?? detectTimezone(),
-        () => runtime.getState().config.widgetTimeFormat ?? "24h",
-        () => runtime.getState().config.billingInterval ?? 30,
-      );
+      startWidget(ctx);
     } else {
       notify(
         ctx,
         "Venice stats widget skipped — another pi session is already polling venicestats.com.\n" +
-        "To enable it here, close the other session first.\n" +
-        "Run /venice-panel reset in the active session to restore the default panels.",
+        "If that session is no longer running, use /venice-widget claim to take over.",
         "info",
       );
     }

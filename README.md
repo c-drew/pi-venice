@@ -302,7 +302,7 @@ A single 500 ms master ticker fires each source only when its computed interval 
 - The minimum interval per source is `floor(60s / budget)` to prevent bursting.
 - venicestats.com allows 60 req/min per IP; the default leaves a comfortable margin.
 
-> **Multi-session warning** — if you open more than one `pi` session, only the **first** session to start will show the stats widget. Additional sessions display an info notice and make no API requests. This prevents two sessions from doubling the request rate and hitting the rate limit. To transfer the widget to a different session, close the first one.
+> **Multi-session warning** — if you open more than one `pi` session, only the **first** session to start will show the stats widget. Additional sessions display an info notice and make no API requests. This prevents two sessions from doubling the request rate and hitting the rate limit. To transfer the widget to a different session, close the first one. If the owning session exited without releasing the lock, run `/venice-widget claim` in the new session to take over.
 
 ## Commands
 

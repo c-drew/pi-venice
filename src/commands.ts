@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { PANEL_REGISTRY, PANEL_IDS, DEFAULT_PANELS, detectTimezone } from "./panels.ts";
+import { tryClaimStaleWidgetLock, stopPriceWidget } from "./helpers.ts";
 
 import {
   DEFAULTABLE_FAMILIES,
@@ -20,7 +21,7 @@ import {
 import type { DefaultableFamily } from "./types.ts";
 import type { VeniceRuntime } from "./runtime.ts";
 
-export function registerVeniceCommands(pi: ExtensionAPI, runtime: VeniceRuntime) {
+export function registerVeniceCommands(pi: ExtensionAPI, runtime: VeniceRuntime, startWidget: (ctx: any) => void) {
   pi.registerCommand("venice-refresh-models", {
     description: "Fetch Venice model catalog and re-register the Venice text provider",
     handler: async (_args, ctx) => {
@@ -431,6 +432,29 @@ export function registerVeniceCommands(pi: ExtensionAPI, runtime: VeniceRuntime)
       runtime.setState({ ...runtime.getState(), config: { ...runtime.getState().config, billingInterval: Math.round(n) } });
       runtime.saveState();
       notify(ctx, `Billing poll interval set to ${Math.round(n)}s (was ${current}s). Takes effect on the next tick.`, "success");
+    },
+  });
+
+  pi.registerCommand("venice-widget", {
+    description: "Manage the stats widget lock: /venice-widget claim — force-take the widget if the owning session is gone",
+    handler: async (args, ctx) => {
+      const sub = (args ?? "").trim();
+
+      if (sub === "claim") {
+        if (tryClaimStaleWidgetLock()) {
+          stopPriceWidget(ctx);
+          startWidget(ctx);
+          notify(ctx, "Stats widget claimed — polling started in this session.", "success");
+        } else {
+          notify(ctx, "Another pi session is still running and holds the widget lock.\nClose it first, then run /venice-widget claim again.", "error");
+        }
+        return;
+      }
+
+      notify(ctx,
+        "Usage: /venice-widget claim — force-take the widget lock when the previous session is gone.",
+        "info"
+      );
     },
   });
 }

@@ -489,20 +489,47 @@ const TICK_MS           = 500;
 const WIDGET_LOCK       = join(homedir(), ".pi", "venice-stats.pid");
 let _lockOwned          = false;
 
+function isPiProcess(pid: number): boolean {
+  // Fast path: same process — always live
+  if (pid === process.pid) return true;
+  // Check the process exists at all
+  try { process.kill(pid, 0); } catch { return false; }
+  // On Linux (including WSL), verify the PID belongs to a pi process.
+  // /proc/<pid>/cmdline contains null-separated argv; if the lock was left by
+  // a dead pi session whose PID got reused by something else, this catches it.
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    // Accept if any argv token looks like the pi CLI binary
+    return cmdline.split("\0").some((tok) => /\bpi\b/.test(tok));
+  } catch {
+    // /proc not available (macOS) — fall back to kill(0) result above (true)
+    return true;
+  }
+}
+
 export function tryAcquireWidgetLock(): boolean {
   try {
     if (existsSync(WIDGET_LOCK)) {
       const raw = readFileSync(WIDGET_LOCK, "utf8").trim();
       const pid = Number(raw);
-      if (!isNaN(pid) && pid !== process.pid) {
-        try { process.kill(pid, 0); return false; } // another live session
-        catch { /* stale PID — fall through and overwrite */ }
+      if (!isNaN(pid) && isPiProcess(pid) && pid !== process.pid) {
+        return false; // another live pi session owns the lock
       }
+      // stale or self — fall through and overwrite
     }
     writeFileSync(WIDGET_LOCK, String(process.pid), "utf8");
     _lockOwned = true;
     return true;
   } catch { return false; }
+}
+
+/** Attempt to claim the lock when the previous owner appears to be gone.
+ *  Returns true if acquired, false if another live pi session still holds it. */
+export function tryClaimStaleWidgetLock(): boolean {
+  // If the normal acquire succeeds (no lock, or genuinely stale PID), take it.
+  if (tryAcquireWidgetLock()) return true;
+  // Lock exists and the owning process looks alive — refuse to override.
+  return false;
 }
 
 export function releaseWidgetLock(): void {
