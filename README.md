@@ -192,9 +192,10 @@ When running in interactive mode (`pi`), the extension renders a live stats widg
 ### Default view
 
 ```
-VVV $8.5412  +13.4% 24h  ·  DIEM $1109.77  +17.4% 24h  ·  ETH $2320.86      EDT 7:06:02 PM  ·  $0.34 USD  ·  5.00/4.96 DIEM  ·  reset 0h 53m 57s
+VVV $8.5412  +13.4% 24h  ·  DIEM $1109.77  +17.4% 24h  ·  ETH $2320.86      EDT 7:06:02 PM  ·  $0.34 USD  ·  DIEM Balance 0.04 / 4.96 used  ·  reset 0h 53m 57s
 MCap $393.4M  ·  Staked 67.8% @ 18.2% APR  ·  Locked 25.9%
-gekko.eth  Consul Dolphin  ·  sVVV 12.1k  ·  DIEM staked 33.14  ·  Pending 92.47 VVV  ·  Rank #18/14.4k
+gekko.eth  Consul Dolphin 🐬  ·  Portfolio $742.3K  ·  Rank #18/14.4k
+ - sVVV 12,100  ·  DIEM staked 33.14  ·  Pending 92.47 VVV
 ```
 
 VVV and DIEM prices flash **green** on uptick and **red** on downtick.
@@ -204,7 +205,7 @@ VVV and DIEM prices flash **green** on uptick and **red** on downtick.
 A clock is always right-aligned on the first row of the widget, showing your local timezone-aware time. When `VENICE_ADMIN_API_KEY` is set it also shows your Venice billing balance:
 
 - **`$X.XX USD`** — USD balance (only displayed when ≥ $0.01; omitted when exactly 0)
-- **`allocation/balance DIEM`** — DIEM epoch allocation vs. remaining balance, with 2 decimals on both sides. Balance turns **red** when remaining drops below 10% of allocation.
+- **`DIEM Balance X / Y used`** — amount consumed vs. epoch allocation, both with 2 decimals. Consumed amount turns **red** when remaining drops below 10% of allocation.
 - **`reset Xh YYm ZZs`** — countdown to the next midnight-UTC DIEM epoch reset.
 
 Without `VENICE_ADMIN_API_KEY` the clock gracefully degrades to just the time.
@@ -229,7 +230,7 @@ export VENICE_ADMIN_API_KEY="your-venice-admin-key"
 
 ### Tracking your wallet
 
-Set your wallet address to see your Venetian stats (sVVV, DIEM staked, pending rewards, rank):
+Set your wallet address to see your Venetian stats (role, tier, sVVV, DIEM staked, pending rewards, portfolio value, rank):
 
 ```bash
 export VENICE_WALLET=0x<your-address>
@@ -245,7 +246,7 @@ Or set it from inside the TUI (persisted across sessions):
 
 ### Dashboard panels
 
-The dashboard is built from composable panels. Each panel is a single row.
+The dashboard is built from composable panels. Most panels are a single row; the wallet panel spans two rows.
 
 **List all panels:**
 ```text
@@ -268,7 +269,7 @@ The dashboard is built from composable panels. Each panel is a single row.
 |----|-------|---------------|-------------|
 | `prices` | Prices | VVV + DIEM + ETH spot prices with 24h % change. Prices flash on tick. | `/api/metrics` every 5s |
 | `protocol` | Protocol | Market cap, staking ratio, APR, sVVV lock ratio | `/api/metrics` every 5s |
-| `wallet` | Wallet | Your Venetian: sVVV staked, DIEM staked, pending rewards, role and rank | `/api/venetians` every 60s |
+| `wallet` | Wallet | Row 1: identity (name, role, tier emoji), portfolio USD, rank. Row 2: sVVV, DIEM staked, pending rewards | `/api/venetians` every 60s |
 | `diem` | DIEM | DIEM supply, mint rate (sVVV), remaining mintable supply, stake ratio | `/api/metrics` every 5s |
 | `social` | Social | Erik Voorhees followers, CoinGecko sentiment %, VVV + DIEM market cap ranks | `/api/social` every 5m |
 | `burns` | Burns | Total VVV burned, organic burn volume, annual deflation rate | `/api/metrics` every 5s |
